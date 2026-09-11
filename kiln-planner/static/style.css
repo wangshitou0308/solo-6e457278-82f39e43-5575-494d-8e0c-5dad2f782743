@@ -21,6 +21,9 @@
 
 * { box-sizing: border-box; }
 
+/* 保证 hidden 属性始终生效（.modal-backdrop 的 display:flex 会覆盖 UA 默认隐藏） */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -399,45 +402,75 @@ input.invalid { border-color: var(--error); background: var(--error-bg); }
 }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
 
-/* ========== 打印卡 ========== */
+/* ========== 打印卡（单页 A4） ========== */
 .print-card {
   background: #fff;
   color: #000;
-  padding: 10mm;
+  padding: 6mm 8mm;
+  max-width: 210mm;
+  margin: 0 auto;
 }
-.print-card h1 { font-size: 18pt; margin: 0 0 2mm; }
-.print-card .pc-meta { font-size: 9.5pt; color: #333; margin-bottom: 4mm; display: flex; gap: 12mm; flex-wrap: wrap; }
+.print-card h1 { font-size: 14pt; margin: 0 0 2mm; }
+.print-card .pc-meta {
+  font-size: 8.5pt; color: #222;
+  display: flex; gap: 4mm 7mm; flex-wrap: wrap;
+  border-bottom: 0.5pt solid #999; padding-bottom: 2mm; margin-bottom: 2.5mm;
+}
 .print-card .pc-warn {
-  border: 1.5pt solid #000;
-  padding: 2mm 3mm;
-  margin-bottom: 4mm;
-  font-size: 10pt;
-  font-weight: 700;
+  border: 1pt solid #000;
+  padding: 1.5mm 2.5mm;
+  margin-bottom: 2.5mm;
+  font-size: 8.5pt;
+  line-height: 1.5;
 }
-.print-card svg.pc-chart { width: 100%; height: 48mm; }
+.print-card .pc-warn-title { font-weight: 700; }
+.print-card .pc-warn-tags { display: flex; flex-wrap: wrap; gap: 1.5mm 4mm; margin-top: 0.8mm; }
+.print-card .pc-warn .wt { font-weight: 700; white-space: nowrap; }
+.print-card svg.pc-chart { width: 100%; height: 54mm; display: block; }
 .print-card table.pc-table {
-  width: 100%; border-collapse: collapse; margin-top: 4mm; font-size: 10pt;
+  width: 100%; border-collapse: collapse;
+  margin-top: 2mm; font-size: 8.5pt;
 }
 .print-card .pc-table th, .print-card .pc-table td {
-  border: 0.6pt solid #333; padding: 1.5mm 2.5mm; text-align: right;
-  font-variant-numeric: tabular-nums;
+  border: 0.5pt solid #444; padding: 0.9mm 2mm;
+  text-align: right; font-variant-numeric: tabular-nums;
+  line-height: 1.25;
 }
-.print-card .pc-table th { background: #eee; }
-.print-card .pc-table td:first-child, .print-card .pc-table th:first-child { text-align: center; }
-.print-card .pc-foot { margin-top: 4mm; font-size: 9pt; color: #444; display: flex; justify-content: space-between; }
-.print-card .pc-sign { margin-top: 8mm; display: flex; gap: 16mm; font-size: 10pt; }
-.print-card .pc-sign span { border-top: 0.6pt solid #000; padding: 6mm 10mm 0; }
+.print-card .pc-table th { background: #eee; padding: 1.2mm 2mm; }
+.print-card .pc-table td:first-child,
+.print-card .pc-table th:first-child,
+.print-card .pc-table td:last-child,
+.print-card .pc-table th:last-child { text-align: center; }
+.print-card .pc-foot { margin-top: 2mm; font-size: 8pt; color: #333; }
+.print-card .pc-sign {
+  margin-top: 8mm;
+  padding-top: 7mm;
+  display: flex; gap: 14mm; font-size: 9pt; justify-content: flex-end;
+}
+.print-card .pc-sign span {
+  border-top: 0.6pt solid #000;
+  padding: 5mm 12mm 0;
+  min-width: 28mm;
+  text-align: center;
+}
 
 @media print {
-  body * { visibility: hidden; }
-  #printCard, #printCard * { visibility: visible; }
+  /* 应用主体彻底不占布局（仅 visibility:hidden 仍会生成额外页），
+     #printCard 是 body 的直接子元素，可以单独保留 */
+  body > *:not(#printCard) { display: none !important; }
   #printCard {
     display: block !important;
     position: absolute;
-    inset: 0;
+    left: 10mm; top: 8mm;
+    width: 190mm;
+    height: 280mm;          /* 8+280+8 = 296mm < 297mm，杜绝亚像素溢出第二页 */
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
     box-shadow: none;
   }
-  @page { size: A4 portrait; margin: 10mm; }
+  @page { size: A4 portrait; margin: 0; }
 }
 
 /* ========== 响应式 ========== */

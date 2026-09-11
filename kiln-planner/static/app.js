@@ -236,6 +236,13 @@ function buildModel(plan, kiln) {
       s.flags.add("overTemp"); mark("error");
       addIssue("error", "overTemp", `第 ${i + 1} 段超温`,
         `${tv}°C 超过窑炉温度上限 ${cfg.maxTemp}°C ${tv - cfg.maxTemp}°C。`, node, i);
+    } else if (s.qTarget > cfg.maxTemp) {
+      // 原温度不超，但按步进就近取整后的执行温度越过上限
+      s.flags.add("overTemp"); mark("error");
+      addIssue("error", "overTemp", `第 ${i + 1} 段取整后超温`,
+        `目标 ${tv}°C 未超上限，但按 ${cfg.tempStep}°C 步进取整为 ${s.qTarget}°C 后`
+        + `超过上限 ${cfg.maxTemp}°C ${s.qTarget - cfg.maxTemp}°C，`
+        + `请降低目标温度或核对温度步进/上限配置。`, node, i);
     }
     if (!flat && Number.isFinite(rate) && rate > 0 && rate > cap) {
       s.flags.add("rateOver"); mark("error");
@@ -553,6 +560,21 @@ function commit(mutator, msg) {
   if (state.past.length > HISTORY_LIMIT) state.past.shift();
   mutator();
   afterEdit(msg);
+}
+/* 来自表单输入框的变更：change 可能在焦点尚未离开输入框时触发（合成事件/
+   辅助技术），同步移除该输入框会让 Chromium 焦点清理抛 NotFoundError，
+   因此把重渲染延迟到当前事件结束之后；状态与历史仍立即更新。 */
+function commitInput(mutator, msg) {
+  state.past.push(snapshot());
+  state.future = [];
+  if (state.past.length > HISTORY_LIMIT) state.past.shift();
+  mutator();
+  scheduleSave();
+  saveDraft();
+  setTimeout(() => {
+    renderAll();
+    if (msg) toast(msg);
+  }, 0);
 }
 function afterEdit(msg) {
   scheduleSave();
@@ -1119,9 +1141,39 @@ async function openDiff() {
 function buildPrintCard(model) {
   const d = new Date();
   const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const issues = model.issues.length
-    ? model.issues.map((x) => `${x.sev === "error" ? "✗" : "△"} ${x.title}：${x.desc}`).join("<br>")
-    : "校验通过：无超温 / 超能力 / 零跳温 / 段数溢出，取整无显著偏移。";
+
+  // 问题按类型汇总（具体位置在步骤表“标记”列逐段标出，保证单页排得下）
+  const codeNames = {
+    overTemp: ["超温", "✗"], rateOver: ["能力不足", "✗"],
+    zeroJump: ["零跳温", "✗"], invalid: ["参数无效", "✗"],
+    overflow: ["段数溢出", "✗"], round: ["取整偏移", "△"],
+    timeShift: ["总时长偏移", "△"],
+  };
+  const order = ["overTemp", "rateOver", "zeroJump", "invalid",
+                 "overflow", "round", "timeShift"];
+  const agg = {};
+  model.issues.forEach((x) => {
+    (agg[x.code] ||= { segs: new Set(), global: false });
+    if (x.segIndex >= 0) agg[x.code].segs.add(x.segIndex + 1);
+    else agg[x.code].global = true;
+  });
+  let warnBlock;
+  if (model.issues.length) {
+    const tags = order.filter((c) => agg[c]).map((c) => {
+      const [name, mark] = codeNames[c];
+      const a = agg[c];
+      const loc = a.segs.size
+        ? "段" + Array.from(a.segs).sort((x, y) => x - y).join(",")
+        : (a.global ? "全局" : "");
+      return `<span class="wt">${mark} ${name}${loc ? "：" + loc : ""}</span>`;
+    }).join("");
+    warnBlock = `<div class="pc-warn">
+      <div class="pc-warn-title">校验问题共 ${model.issues.length} 项（错误 ${model.errors} / 提醒 ${model.warns}），修正前请勿录入：</div>
+      <div class="pc-warn-tags">${tags}</div></div>`;
+  } else {
+    warnBlock = `<div class="pc-warn"><b>校验通过</b>：无超温 / 超能力 / 零跳温 / 段数溢出，取整无显著偏移。</div>`;
+  }
+
   const rows = model.segs.map((s) => {
     const star = s.flags.has("round") ? "*" : "";
     const over = s.i >= model.cfg.maxSegments ? "⚠溢出" :
@@ -1144,13 +1196,14 @@ function buildPrintCard(model) {
       <span>温度上限：${model.cfg.maxTemp}℃</span>
       <span>控制器：${model.cfg.maxSegments} 段</span>
       <span>起始炉温：${model.startT}℃</span>
-      <span>总时长：${fmtMin(model.compiledTotalMin)}</span>
+      <span>计划总时长：${fmtMin(model.totalMin)}</span>
+      <span>执行总时长：${fmtMin(model.compiledTotalMin)}</span>
       <span>日期：${date}</span>
     </div>
-    ${model.issues.length ? `<div class="pc-warn">注意事项：<br>${issues}</div>` : ""}
+    ${warnBlock}
     ${miniChartSVG(
-        [{ plan: state.plan.data, name: "原曲线", color: "#b4512e", dash: false },
-         { plan: state.plan.data, name: "执行曲线（取整后）", color: "#2f6690", dash: true, compiled: true }],
+        [{ plan: state.plan.data, name: "原曲线", color: "#000", dash: false },
+         { plan: state.plan.data, name: "执行曲线（取整）", color: "#666", dash: true, compiled: true }],
         state.kiln.config, 760, 200)}
     <table class="pc-table">
       <thead><tr><th>#</th><th>速率 ℃/h</th><th>目标 ℃</th><th>保温 min</th>
@@ -1210,7 +1263,9 @@ async function importJSON(file) {
   }
   const kid = await Store.createKiln(kilnName, kilnConfig);
   const pid = await Store.createPlan(kid, planName, planData);
+  state.kilns = await Store.listKilns();
   await loadKiln(kid, pid);
+  await renderSelectors();
   clearDraft();
   toast("已导入为新窑炉与新方案");
 }
@@ -1252,7 +1307,9 @@ function toggleExamples(btn) {
       menu.remove();
       const kid = await Store.createKiln(ex.kilnName, deepClone(ex.kilnConfig));
       const pid = await Store.createPlan(kid, ex.planName, deepClone(ex.plan));
+      state.kilns = await Store.listKilns();
       await loadKiln(kid, pid);
+      await renderSelectors();
       clearDraft();
       toast("已载入示例（可自由编辑）");
     };
@@ -1292,15 +1349,36 @@ function splitSegment(i) {
 function mergeSegment(i) {
   const segs = state.plan.data.segments;
   if (i >= segs.length - 1) return;
+  const a = segs[i], b = segs[i + 1];
+  const from = i === 0 ? state.plan.data.startTemp : segs[i - 1].target;
+  const end = b.target;
+
+  // 合并只能把“同向路径上的转角”拉直；下列情形会删除或改变烧成过程，必须拒绝
+  const reason =
+    end === from
+      ? `第 ${i + 1}、${i + 2} 段是往返段（${from}→${a.target}→${end}℃），`
+        + "合并后净温差为 0，烧成过程会被静默删除，已保留原段。"
+    : (a.target > Math.max(from, end) || a.target < Math.min(from, end))
+      ? `第 ${i + 1}、${i + 2} 段的中间温度 ${a.target}℃ 超出合并路径 `
+        + `${from}→${end}℃，合并会丢掉这段温度行程，已保留原段。`
+      : (a.hold > 0 && a.target !== end)
+        ? `第 ${i + 1} 段在 ${a.target}℃ 有 ${a.hold}min 保温，合并后保温会被移到终点 `
+          + `${end}℃（工艺被改变），已保留原段。如确需合并，请先手动清零该段保温。`
+        : null;
+  if (reason) {
+    state.selSeg = i;
+    renderAll();
+    toast(reason);
+    return;
+  }
+
   commit(() => {
-    const a = segs[i], b = segs[i + 1];
-    const from = i === 0 ? state.plan.data.startTemp : segs[i - 1].target;
     const dT1 = Math.abs(a.target - from), dT2 = Math.abs(b.target - a.target);
     const t1 = a.rate > 0 ? dT1 / a.rate * 60 : 0;
     const t2 = b.rate > 0 ? dT2 / b.rate * 60 : 0;
     const totalT = t1 + t2;
-    const rate = totalT > 0 ? tidy(Math.abs(b.target - from) * 60 / totalT) : 0;
-    segs.splice(i, 2, { rate, target: b.target, hold: tidy(a.hold + b.hold) });
+    const rate = totalT > 0 ? tidy(Math.abs(end - from) * 60 / totalT) : 0;
+    segs.splice(i, 2, { rate, target: end, hold: tidy(a.hold + b.hold) });
     state.selSeg = i;
   }, "已合并相邻段");
 }
@@ -1328,6 +1406,8 @@ async function renderSelectors() {
 }
 
 async function loadKiln(kilnId, preferredPlanId) {
+  if (!state.kilns.some((k) => k.id === kilnId))
+    state.kilns = await Store.listKilns();
   state.kiln = state.kilns.find((k) => k.id === kilnId) || state.kilns[0];
   state.plans = await Store.listPlans(state.kiln.id);
   let planId = preferredPlanId;
@@ -1428,7 +1508,8 @@ function showHelp() {
     <li>在图上拖动 <b>实心圆点</b> 可同时改变目标温度与速率（上下改温度、左右改耗时），
       拖动 <b>空心圆点</b> 改变保温时长，菱形点是起始炉温；按住 <b>Shift</b> 拖动按步进吸附。</li>
     <li>改任意参数后，总时长、各段起止时刻、编译步骤与曲线立即重算。</li>
-    <li><b>拆段</b> 在段中点一分为二；<b>合并</b> 把相邻两段合并为一段（保持总时长不变，转角消失）。</li>
+    <li><b>拆段</b> 在段中点一分为二；<b>合并</b> 把相邻两段拉直成一段（同向路径保持总时长不变）。
+      若合并会删掉温度行程（如 20→100→20℃ 往返段）或移走中间保温，工具会拒绝并保留原段。</li>
   </ul>
   <h3>五类校验问题</h3>
   <ul>
@@ -1491,7 +1572,7 @@ function bindEvents() {
   $("#summaryBar").addEventListener("change", (e) => {
     if (e.target.id === "planNameInput") {
       const v = e.target.value.trim();
-      if (v) { commit(() => { state.plan.name = v; }, null); }
+      if (v) { commitInput(() => { state.plan.name = v; }, null); }
     }
   });
   $("#summaryBar").addEventListener("click", (e) => {
@@ -1506,7 +1587,7 @@ function bindEvents() {
     const i = parseInt(inp.dataset.seg, 10);
     const field = inp.dataset.field;
     const raw = inp.value.trim();
-    commit(() => {
+    commitInput(() => {
       if (raw === "") { state.plan.data.segments[i][field] = ""; }
       else {
         let v = num(raw, 0);
@@ -1535,7 +1616,7 @@ function bindEvents() {
   });
   $("#startTempInput").addEventListener("change", (e) => {
     const v = e.target.value.trim();
-    commit(() => {
+    commitInput(() => {
       state.plan.data.startTemp = v === "" ? "" : num(v, 20);
     }, null);
   });
@@ -1560,7 +1641,7 @@ function bindEvents() {
     if (!inp) return;
     const key = inp.dataset.kfield;
     const v = inp.value.trim();
-    commit(() => {
+    commitInput(() => {
       if (key === "name") state.kiln.name = v || "未命名窑炉";
       else state.kiln.config[key] = v === "" ? 0 : Math.max(0, num(v, 0));
     }, "窑炉参数已更新并重新校验");
