@@ -11,6 +11,7 @@ const LS = {
   kilns: "kp:local:kilns",
   plans: "kp:local:plans",
   versions: "kp:local:versions",
+  firings: "kp:local:firings",
   seq: "kp:local:seq",
   draft: "kp:draft",
 };
@@ -429,6 +430,36 @@ const Store = {
     if (this.mode === "local") return Local.deleteVersion(id);
     await this.api("DELETE", "/api/versions/" + id);
   },
+  // ---- 烧成记录（复盘）：只新增/读取/删除记录，绝不动方案数据 ----
+  async listFirings(planId) {
+    if (this.mode === "local") return Local.listFirings(planId);
+    const rows = await this.api("GET", `/api/plans/${planId}/firings`);
+    return rows.map((r) => ({ id: r.id, planId: r.plan_id, name: r.name,
+                              createdAt: r.created_at,
+                              sampleCount: r.sample_count }));
+  },
+  async createFiring(planId, name, meta, samples) {
+    if (this.mode === "local")
+      return Local.createFiring(planId, name, meta, samples);
+    return (await this.api("POST", `/api/plans/${planId}/firings`,
+                           { name, meta, samples })).id;
+  },
+  async getFiring(id) {
+    if (this.mode === "local") return Local.getFiring(id);
+    const r = await this.api("GET", "/api/firings/" + id);
+    return { id: r.id, planId: r.plan_id, name: r.name,
+             createdAt: r.created_at,
+             meta: JSON.parse(r.meta || "{}"),
+             samples: JSON.parse(r.samples || "[]") };
+  },
+  async updateFiring(id, name, meta) {
+    if (this.mode === "local") return Local.updateFiring(id, name, meta);
+    await this.api("PUT", "/api/firings/" + id, { name, meta });
+  },
+  async deleteFiring(id) {
+    if (this.mode === "local") return Local.deleteFiring(id);
+    await this.api("DELETE", "/api/firings/" + id);
+  },
 };
 
 const Local = {
@@ -457,7 +488,11 @@ const Local = {
   },
   async deleteKiln(id) {
     this.write(LS.kilns, this.read(LS.kilns, []).filter((r) => r.id !== id));
+    const deadPlans = this.read(LS.plans, [])
+      .filter((r) => r.kilnId === id).map((r) => r.id);
     this.write(LS.plans, this.read(LS.plans, []).filter((r) => r.kilnId !== id));
+    this.write(LS.firings,
+      this.read(LS.firings, []).filter((r) => !deadPlans.includes(r.planId)));
   },
   async listPlans(kilnId) {
     return this.read(LS.plans, []).filter((r) => r.kilnId === kilnId)
@@ -478,6 +513,7 @@ const Local = {
   async deletePlan(id) {
     this.write(LS.plans, this.read(LS.plans, []).filter((r) => r.id !== id));
     this.write(LS.versions, this.read(LS.versions, []).filter((r) => r.planId !== id));
+    this.write(LS.firings, this.read(LS.firings, []).filter((r) => r.planId !== id));
   },
   async getPlan(id) {
     const p = this.read(LS.plans, []).find((r) => r.id === id);
@@ -500,6 +536,32 @@ const Local = {
   },
   async deleteVersion(id) {
     this.write(LS.versions, this.read(LS.versions, []).filter((v) => v.id !== id));
+  },
+  // ---- 烧成记录（本地回退存储） ----
+  async listFirings(planId) {
+    return this.read(LS.firings, [])
+      .filter((r) => r.planId === planId)
+      .sort((a, b) => b.id - a.id)
+      .map((r) => ({ id: r.id, planId: r.planId, name: r.name,
+                     createdAt: r.createdAt, sampleCount: r.samples.length }));
+  },
+  async createFiring(planId, name, meta, samples) {
+    const rows = this.read(LS.firings, []);
+    const id = this.nextId();
+    rows.push({ id, planId, name, meta, samples, createdAt: nowLabel() });
+    this.write(LS.firings, rows);
+    return id;
+  },
+  async getFiring(id) {
+    return this.read(LS.firings, []).find((r) => r.id === id) || null;
+  },
+  async updateFiring(id, name, meta) {
+    const rows = this.read(LS.firings, []);
+    const f = rows.find((r) => r.id === id);
+    if (f) { f.name = name; f.meta = meta; this.write(LS.firings, rows); }
+  },
+  async deleteFiring(id) {
+    this.write(LS.firings, this.read(LS.firings, []).filter((r) => r.id !== id));
   },
 };
 
@@ -629,7 +691,9 @@ function renderChart() {
   if (!state.plan) return;
   const model = buildModel(state.plan.data, state.kiln.config);
   CH.model = model;
-  const { xmax, ymin, ymax } = chartDomains(model);
+  const dom = chartDomains(model);
+  if (window.Review) Review.extendDomain(dom);  // 复盘实测曲线可能超出方案域
+  const { xmax, ymin, ymax } = dom;
   Object.assign(CH, {
     W: Math.max(560, wrap.clientWidth - 4),
     Tmax: xmax, ymin, ymax,
@@ -678,6 +742,7 @@ function renderChart() {
   const compPts = curvePoints(state.plan.data, model, true);
   g += `<path class="curve-comp" d="${pathFrom(compPts)}"/>`;
   g += `<path class="curve-plan" d="${pathFrom(planPts)}"/>`;
+  if (window.Review) g += Review.chartOverlay(X, Y, model);  // 复盘叠加层
 
   // 节点
   const nodeSVG = (id, cx, cy, kind, title, badge) => {
@@ -1427,6 +1492,7 @@ async function loadPlan(planId) {
   state.past = [];
   state.future = [];
   state.selSeg = null; state.selNode = null;
+  if (window.Review) Review.onPlanChanged();      // 复盘记录随方案切换
   await refreshVersions();
   renderAll();
 }
@@ -1483,6 +1549,7 @@ function renderAll() {
   renderIssues(model);
   renderSteps(model);
   renderKilnForm();
+  if (window.Review) Review.onRenderAll(model);   // 复盘面板联动
   $("#btnUndo").disabled = state.past.length === 0;
   $("#btnRedo").disabled = state.future.length === 0;
 }
@@ -1525,6 +1592,17 @@ function showHelp() {
     <li>“存为版本”冻结当前计划；随时可载入旧版，或在“版本 / 对照”里 A/B 对照参数与曲线。</li>
     <li>导出/导入为 JSON 文件，便于在同事电脑间传递（导入会新建窑炉与方案，不覆盖现有数据）。</li>
     <li>“打印卡”生成 A4 单页程序卡，含步骤表、曲线、问题提示与签名栏。</li>
+  </ul>
+  <h3>烧成复盘</h3>
+  <ul>
+    <li>在「烧成复盘」页导入控制器导出的 CSV：预览后指定时间列、炉温列与单位，
+      裁掉点火前后区间并选定零时刻（应对齐方案程序起点）。</li>
+    <li>空值、乱序、重复时间与异常采样间隔会逐行单独列出，<b>不做任何静默插值</b>。</li>
+    <li>实测曲线（绿色）与取整执行曲线叠加，按各段窗口计算实测速率、到温时刻、
+      保温偏差与超调，并标出未到温 / 持续偏离 / 采样缺口；点击发现可定位图表区间与 CSV 原始行。</li>
+    <li>温度容差、最小持续时长、最大采样间隔可随时调整并立即重算；
+      一个方案可保存多条烧成记录，可任选两条对照每段偏差，也可导出复盘 JSON。
+      导入与复盘<b>不会修改方案程序</b>。</li>
   </ul>
   <h3>快捷键与数据</h3>
   <ul>

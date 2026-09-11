@@ -48,6 +48,15 @@ CREATE TABLE IF NOT EXISTS versions (
     data        TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+CREATE TABLE IF NOT EXISTS firings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id     INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    meta        TEXT NOT NULL,
+    samples     TEXT NOT NULL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
 """
 
 
@@ -189,6 +198,65 @@ def api_delete_version(conn, version_id):
     return {"ok": True}
 
 
+# ---- 烧成记录（实际烧成复盘）：只读引用方案，绝不改写方案数据 ----
+
+def api_list_firings(conn, plan_id):
+    rows = conn.execute(
+        "SELECT id, plan_id, name, sample_count, created_at FROM firings "
+        "WHERE plan_id=? ORDER BY id DESC", (plan_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def api_create_firing(conn, plan_id, body):
+    name = str(body.get("name", "")).strip() or "未命名烧成记录"
+    meta = body.get("meta", {})
+    samples = body.get("samples", [])
+    if not isinstance(samples, list) or len(samples) < 2:
+        raise ValueError("烧成记录至少需要 2 个采样点")
+    if len(samples) > 200000:
+        raise ValueError("采样点超过 200000，请先在控制器侧降采样后再导入")
+    clean = []
+    for s in samples:
+        if not isinstance(s, (list, tuple)) or len(s) < 3:
+            raise ValueError("采样点格式无效（应为 [分钟, 温度, CSV行号, 原始时间]）")
+        t, temp = s[0], s[1]
+        if (not isinstance(t, (int, float))
+                or not isinstance(temp, (int, float))):
+            raise ValueError("采样点包含非数值")
+        clean.append([t, temp, int(s[2]),
+                      str(s[3])[:64] if len(s) > 3 else ""])
+    cur = conn.execute(
+        "INSERT INTO firings(plan_id, name, meta, samples, sample_count) "
+        "VALUES(?,?,?,?,?)",
+        (plan_id, name, json.dumps(meta, ensure_ascii=False),
+         json.dumps(clean, ensure_ascii=False), len(clean)))
+    conn.commit()
+    return {"id": cur.lastrowid}
+
+
+def api_get_firing(conn, firing_id):
+    row = conn.execute(
+        "SELECT id, plan_id, name, meta, samples, created_at FROM firings "
+        "WHERE id=?", (firing_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def api_update_firing(conn, firing_id, body):
+    # 仅允许改名与更新元信息（如分析参数），实测样本保存后不可改写
+    name = str(body.get("name", "")).strip() or "未命名烧成记录"
+    meta = json.dumps(body.get("meta", {}), ensure_ascii=False)
+    conn.execute("UPDATE firings SET name=?, meta=? WHERE id=?",
+                 (name, meta, firing_id))
+    conn.commit()
+    return {"ok": True}
+
+
+def api_delete_firing(conn, firing_id):
+    conn.execute("DELETE FROM firings WHERE id=?", (firing_id,))
+    conn.commit()
+    return {"ok": True}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "KilnPlanner/1.0"
 
@@ -281,6 +349,14 @@ class Handler(BaseHTTPRequestHandler):
                         and parts[3] == "versions"):
                     return self.send_json(
                         api_list_versions(conn, int(parts[2])))
+                if (len(parts) == 4 and parts[1] == "plans"
+                        and parts[3] == "firings"):
+                    return self.send_json(
+                        api_list_firings(conn, int(parts[2])))
+                if len(parts) == 3 and parts[1] == "firings":
+                    result = api_get_firing(conn, int(parts[2]))
+                    return (self.send_json(result) if result
+                            else self.send_error_json(404, "烧成记录不存在"))
                 if len(parts) == 3 and parts[1] == "versions":
                     result = api_get_version(conn, int(parts[2]))
                     return (self.send_json(result) if result
@@ -308,6 +384,10 @@ class Handler(BaseHTTPRequestHandler):
                         and parts[3] == "versions"):
                     result = api_create_version(conn, int(parts[2]), body)
                     return self.send_json(result)
+                if (len(parts) == 4 and parts[1] == "plans"
+                        and parts[3] == "firings"):
+                    result = api_create_firing(conn, int(parts[2]), body)
+                    return self.send_json(result)
             self.send_error_json(404, "未知接口")
         except ValueError as exc:
             self.send_error_json(400, str(exc))
@@ -327,6 +407,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"ok": True})
                 if len(parts) == 3 and parts[1] == "plans":
                     api_update_plan(conn, int(parts[2]), body)
+                    return self.send_json({"ok": True})
+                if len(parts) == 3 and parts[1] == "firings":
+                    api_update_firing(conn, int(parts[2]), body)
                     return self.send_json({"ok": True})
             self.send_error_json(404, "未知接口")
         except ValueError as exc:
@@ -349,6 +432,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"ok": True})
                 if len(parts) == 3 and parts[1] == "versions":
                     api_delete_version(conn, int(parts[2]))
+                    return self.send_json({"ok": True})
+                if len(parts) == 3 and parts[1] == "firings":
+                    api_delete_firing(conn, int(parts[2]))
                     return self.send_json({"ok": True})
             self.send_error_json(404, "未知接口")
         except (ValueError, IndexError) as exc:

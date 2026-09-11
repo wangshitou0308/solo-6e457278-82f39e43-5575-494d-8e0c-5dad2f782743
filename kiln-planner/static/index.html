@@ -49,10 +49,54 @@
         <div class="legend">
           <span class="legend-item"><i class="sw sw-plan"></i>原曲线</span>
           <span class="legend-item"><i class="sw sw-comp"></i>取整后执行曲线</span>
+          <span class="legend-item" id="legendActual" hidden><i class="sw sw-actual"></i>实测曲线</span>
           <span class="legend-hint">拖动节点直接编辑：升温段节点可上下/左右拖，保温段右端只可左右拖（按住 Shift 吸附步进）</span>
         </div>
       </div>
+      <div id="reviewActiveBar" class="review-active-bar" hidden></div>
       <div id="chartWrap" class="chart-wrap"></div>
+    </div>
+
+    <div class="card" id="reviewSegCard" hidden>
+      <div class="card-head">
+        <h2>分段复盘 <span class="legend-hint" id="reviewSegSub"></span></h2>
+      </div>
+      <div class="table-wrap">
+        <table class="seg-table" id="reviewSegTable">
+          <thead>
+            <tr>
+              <th class="c-idx">#</th>
+              <th>段窗口</th>
+              <th>计划速率</th>
+              <th>实测速率</th>
+              <th>到温时刻</th>
+              <th>保温偏差</th>
+              <th>超调</th>
+              <th>标记</th>
+            </tr>
+          </thead>
+          <tbody id="reviewSegTbody"></tbody>
+        </table>
+      </div>
+      <p class="note">按当前方案的取整执行曲线划分时间窗口；点击任意行可在图上高亮该窗口并列出 CSV 原始行。</p>
+    </div>
+
+    <div class="card" id="reviewLocateCard" hidden>
+      <div class="card-head">
+        <h2 id="reviewLocateTitle">CSV 原始行</h2>
+        <div class="card-tools">
+          <button id="btnLocateClose">关闭</button>
+        </div>
+      </div>
+      <div class="table-wrap review-locate-wrap">
+        <table class="seg-table">
+          <thead>
+            <tr><th class="c-idx">CSV 行</th><th>原始时间</th><th>t (min)</th><th>温度 ℃</th></tr>
+          </thead>
+          <tbody id="reviewLocateTbody"></tbody>
+        </table>
+      </div>
+      <p class="note" id="reviewLocateNote"></p>
     </div>
 
     <div class="card">
@@ -92,6 +136,7 @@
     <nav class="tabs">
       <button class="tab active" data-tab="check">校验与步骤</button>
       <button class="tab" data-tab="versions">版本 / 对照</button>
+      <button class="tab" data-tab="review">烧成复盘</button>
       <button class="tab" data-tab="kiln">窑炉参数</button>
     </nav>
 
@@ -120,6 +165,40 @@
           <label>B <select id="diffB"></select></label>
         </div>
         <button id="btnDiff" class="primary full">对照 A → B</button>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="review">
+      <div class="side-section">
+        <h3>烧成记录（实际烧成复盘）</h3>
+        <div class="review-toolbar">
+          <button id="btnImportCsv" class="primary">导入控制器 CSV</button>
+        </div>
+        <div id="firingList" class="version-list"></div>
+        <p class="note">导入仅保存实测数据用于复盘，<b>不会修改方案程序</b>；一个方案可挂多条烧成记录。</p>
+      </div>
+      <div class="side-section" id="reviewParamSection" hidden>
+        <h3>分析参数（改动立即重算）</h3>
+        <div class="kiln-form" id="reviewParamsForm"></div>
+      </div>
+      <div class="side-section" id="reviewFindingsSection" hidden>
+        <h3>复盘发现</h3>
+        <div id="reviewFindings" class="issue-list"></div>
+      </div>
+      <div class="side-section" id="reviewQualitySection" hidden>
+        <h3>数据质量（导入时逐行检查）</h3>
+        <div id="reviewQuality"></div>
+      </div>
+      <div class="side-section" id="reviewCompareSection" hidden>
+        <h3>两次烧成对照</h3>
+        <p class="note">任选两条记录，按当前分析参数对照每段偏差。</p>
+        <div class="diff-pickers">
+          <label>A <select id="cmpA"></select></label>
+          <label>B <select id="cmpB"></select></label>
+        </div>
+        <div style="padding:0 14px 12px">
+          <button id="btnCompareFirings" class="primary full">对照 A → B</button>
+        </div>
       </div>
     </div>
 
@@ -161,11 +240,51 @@
   </div>
 </div>
 
+<!-- CSV 导入向导弹窗 -->
+<div class="modal-backdrop" id="csvModal" hidden>
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h2>导入控制器 CSV（实际烧成）</h2>
+      <button class="modal-close" data-close="csvModal">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="csvStepFile">
+        <p class="note" style="padding:0 0 10px">
+          选择控制器导出的 CSV 文本文件。支持逗号 / 分号 / 制表符分隔，UTF-8 或 GBK 编码；
+          时间可以是日期时间、时钟或相对秒 / 分钟 / 小时。导入只保存实测数据，不会改动方案程序。
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button id="btnCsvPick" class="primary">选择 CSV 文件…</button>
+          <button id="btnCsvDemo">下载示例 CSV</button>
+        </div>
+        <input type="file" id="fileCsv" accept=".csv,.txt,text/csv,text/plain" hidden>
+        <div id="csvFileError"></div>
+      </div>
+      <div id="csvStepMap" hidden></div>
+      <div id="csvStepTrim" hidden></div>
+    </div>
+  </div>
+</div>
+
+<!-- 两次烧成对照弹窗 -->
+<div class="modal-backdrop" id="firingDiffModal" hidden>
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h2>两次烧成对照</h2>
+      <button class="modal-close" data-close="firingDiffModal">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="firingDiffContent"></div>
+    </div>
+  </div>
+</div>
+
 <!-- 打印卡（仅打印时显示） -->
 <div id="printCard" class="print-card" hidden></div>
 
 <div id="toast" class="toast" hidden></div>
 
 <script src="app.js"></script>
+<script src="review.js"></script>
 </body>
 </html>
