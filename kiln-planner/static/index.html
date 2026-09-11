@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>窑烧程序校对工具</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%94%A5%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-icon">🔥</span>
+    <strong>窑烧程序校对</strong>
+  </div>
+  <div class="selectors">
+    <label>窑炉
+      <select id="kilnSelect" title="选择窑炉"></select>
+    </label>
+    <label>方案
+      <select id="planSelect" title="选择方案"></select>
+    </label>
+  </div>
+  <div class="actions">
+    <button id="btnUndo" title="撤销 Ctrl+Z" disabled>↶ 撤销</button>
+    <button id="btnRedo" title="重做 Ctrl+Y / Ctrl+Shift+Z" disabled>↷ 重做</button>
+    <span class="divider"></span>
+    <button id="btnExamples">载入示例 ▾</button>
+    <button id="btnExport">导出 JSON</button>
+    <button id="btnImport">导入 JSON</button>
+    <input type="file" id="fileImport" accept=".json,application/json" hidden>
+    <span class="divider"></span>
+    <button id="btnSaveVersion">存为版本</button>
+    <button id="btnPrint">打印卡</button>
+    <button id="btnHelp" title="帮助">？</button>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- 左主区 -->
+  <section class="main-col">
+    <div class="summary-bar" id="summaryBar"></div>
+
+    <div class="card chart-card">
+      <div class="card-head">
+        <h2>温度曲线</h2>
+        <div class="legend">
+          <span class="legend-item"><i class="sw sw-plan"></i>原曲线</span>
+          <span class="legend-item"><i class="sw sw-comp"></i>取整后执行曲线</span>
+          <span class="legend-hint">拖动节点直接编辑：升温段节点可上下/左右拖，保温段右端只可左右拖（按住 Shift 吸附步进）</span>
+        </div>
+      </div>
+      <div id="chartWrap" class="chart-wrap"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>分段编排</h2>
+        <div class="card-tools">
+          <button id="btnAddSegment" class="primary">＋ 追加段</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="seg-table" id="segTable">
+          <thead>
+            <tr>
+              <th class="c-idx">#</th>
+              <th>方向</th>
+              <th>速率 °C/h</th>
+              <th>目标温度 °C</th>
+              <th>保温 min</th>
+              <th class="c-time">起始时刻</th>
+              <th class="c-time">结束时刻</th>
+              <th class="c-op">操作</th>
+            </tr>
+          </thead>
+          <tbody id="segTbody"></tbody>
+        </table>
+      </div>
+      <div class="seg-editor-foot">
+        <label>起始温度（室温/炉温）
+          <input type="number" id="startTempInput" class="num small" step="1"> °C
+        </label>
+      </div>
+    </div>
+  </section>
+
+  <!-- 右侧标签栏 -->
+  <aside class="side-col">
+    <nav class="tabs">
+      <button class="tab active" data-tab="check">校验与步骤</button>
+      <button class="tab" data-tab="versions">版本 / 对照</button>
+      <button class="tab" data-tab="kiln">窑炉参数</button>
+    </nav>
+
+    <div class="tab-panel active" data-panel="check">
+      <div class="side-section">
+        <h3>问题清单</h3>
+        <div id="issueList" class="issue-list"></div>
+      </div>
+      <div class="side-section">
+        <h3>编译步骤（录入控制器）</h3>
+        <div id="stepsList" class="steps-list"></div>
+        <p class="note" id="compileNote"></p>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="versions">
+      <div class="side-section">
+        <h3>已保存版本</h3>
+        <div id="versionList" class="version-list"></div>
+      </div>
+      <div class="side-section">
+        <h3>差异对照</h3>
+        <p class="note">选择两个版本（或当前编辑稿）对照参数与曲线差异。</p>
+        <div class="diff-pickers">
+          <label>A <select id="diffA"></select></label>
+          <label>B <select id="diffB"></select></label>
+        </div>
+        <button id="btnDiff" class="primary full">对照 A → B</button>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="kiln">
+      <div class="side-section">
+        <h3>窑炉能力与控制器配置</h3>
+        <div id="kilnForm" class="kiln-form"></div>
+        <div class="kiln-actions">
+          <button id="btnNewKiln">新建窑炉</button>
+          <button id="btnDeleteKiln" class="danger">删除当前窑炉</button>
+        </div>
+        <p class="note" id="storeStatus"></p>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<!-- 差异对照弹窗 -->
+<div class="modal-backdrop" id="diffModal" hidden>
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h2>差异对照</h2>
+      <button class="modal-close" data-close="diffModal">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="diffContent"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 帮助弹窗 -->
+<div class="modal-backdrop" id="helpModal" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>使用说明</h2>
+      <button class="modal-close" data-close="helpModal">×</button>
+    </div>
+    <div class="modal-body" id="helpBody"></div>
+  </div>
+</div>
+
+<!-- 打印卡（仅打印时显示） -->
+<div id="printCard" class="print-card" hidden></div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
