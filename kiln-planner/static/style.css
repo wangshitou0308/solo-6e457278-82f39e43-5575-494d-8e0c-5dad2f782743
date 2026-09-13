@@ -478,3 +478,90 @@ input.invalid { border-color: var(--error); background: var(--error-bg); }
   .layout { grid-template-columns: 1fr; }
   .side-col { position: static; }
 }
+
+/* ========== 烧成复盘 ========== */
+.sw-actual { border-color: var(--green); }
+.curve-actual { fill: none; stroke: var(--green); stroke-width: 1.8; opacity: .92; }
+.review-band {
+  fill: rgba(47, 102, 144, .13);
+  stroke: var(--blue);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+.review-segline { stroke: #d8d2c8; stroke-width: 1; stroke-dasharray: 2 4; }
+.review-active-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 7px 14px;
+  background: var(--ok-bg);
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.review-active-bar button { padding: 1px 10px; font-size: 12px; }
+.review-toolbar { padding: 10px 14px 4px; }
+.review-locate-wrap { max-height: 260px; overflow-y: auto; }
+.issue.info .dot { background: var(--blue); }
+.issue.info:hover { background: var(--blue-soft); }
+.version-row.active-rec { background: var(--ok-bg); }
+.version-row .vact-btns { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+tr.review-seg-row { cursor: pointer; }
+.review-seg-flags .tag { margin-right: 3px; }
+
+/* 数据质量分组 */
+.qgroup { border-top: 1px solid #f0ece6; padding: 6px 14px 8px; }
+.qtitle { font-weight: 600; font-size: 12.5px; margin: 2px 0 4px; }
+.qrow { font-size: 12px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+
+/* CSV 导入向导 */
+.csv-fileinfo {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  background: #faf8f5;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+}
+.csv-preview { border-collapse: collapse; font-size: 12px; margin: 4px 0 8px; }
+.csv-preview th, .csv-preview td {
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+  white-space: nowrap;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.csv-preview tr.head-row td { background: var(--blue-soft); font-weight: 600; }
+.csv-map-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px 18px;
+  margin: 10px 0;
+}
+.csv-map-grid label, .csv-trim-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.csv-trim-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px 16px;
+  margin: 10px 0;
+}
+.csv-error {
+  background: var(--error-bg);
+  color: var(--error);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  margin: 8px 0;
+  white-space: pre-line;
+}
+.csv-stats { display: flex; gap: 8px 18px; flex-wrap: wrap; font-size: 12.5px; margin: 6px 0; }
+.csv-stats b { font-variant-numeric: tabular-nums; }
+.csv-spark { width: 100%; height: auto; display: block; }

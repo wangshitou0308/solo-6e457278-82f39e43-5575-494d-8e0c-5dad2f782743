@@ -17,6 +17,7 @@ import os
 import sqlite3
 import sys
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +57,18 @@ CREATE TABLE IF NOT EXISTS firings (
     samples     TEXT NOT NULL,
     sample_count INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS cone_sheets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id     INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    kiln_id     INTEGER NOT NULL REFERENCES kilns(id) ON DELETE CASCADE,
+    firing_id   INTEGER REFERENCES firings(id) ON DELETE SET NULL,
+    name        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'draft',
+    data        TEXT NOT NULL,
+    snapshot    TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 """
 
@@ -257,6 +270,205 @@ def api_delete_firing(conn, firing_id):
     return {"ok": True}
 
 
+# ---- 见证锥复核观测单：草稿 → 已锁定 → 待判读 → 已封存（单向流转） ----
+CONE_FLOW = {"draft": ["locked"], "locked": ["reading"],
+             "reading": [], "sealed": []}
+CONE_ROLE_NAMES = {"guide": "引导锥", "target": "目标锥", "guard": "保护锥"}
+CONE_POS_EPS = 0.05          # 重位判定阈值（归一化坐标）
+
+
+def _cone_placement(data):
+    """提取布点（不含判读结果）；锁定后这部分必须保持不变。"""
+    layers = []
+    for ly in data.get("layers", []):
+        packs = []
+        for p in ly.get("packs", []):
+            cones = [{"role": c.get("role"), "coneNo": c.get("coneNo"),
+                      "expected": c.get("expected")}
+                     for c in p.get("cones", [])]
+            packs.append({"id": p.get("id"), "x": p.get("x"), "y": p.get("y"),
+                          "note": p.get("note", ""), "cones": cones})
+        layers.append({"id": ly.get("id"), "name": ly.get("name"),
+                       "orient": ly.get("orient", 0), "packs": packs})
+    return {"layers": layers, "grades": data.get("grades", [])}
+
+
+def _cone_unread(data):
+    n = 0
+    for ly in data.get("layers", []):
+        for p in ly.get("packs", []):
+            for c in p.get("cones", []):
+                if not c.get("result"):
+                    n += 1
+    return n
+
+
+def _cone_validate(data):
+    """锁定前检查：重位 / 缺号 / 层板越界 / 等级排序。返回错误文本列表。"""
+    errs = []
+    layers = data.get("layers") or []
+    if not layers:
+        errs.append("至少需要一个层板")
+    npacks = 0
+    for li, ly in enumerate(layers):
+        lname = ly.get("name") or ("第 %d 层" % (li + 1))
+        packs = ly.get("packs") or []
+        npacks += len(packs)
+        for pi, p in enumerate(packs):
+            where = "%s 布点#%d" % (lname, pi + 1)
+            x, y = p.get("x"), p.get("y")
+            if (not isinstance(x, (int, float))
+                    or not isinstance(y, (int, float))
+                    or isinstance(x, bool) or isinstance(y, bool)
+                    or not (0 <= x <= 1) or not (0 <= y <= 1)):
+                errs.append(where + " 超出层板范围")
+            roles = [c.get("role") for c in p.get("cones", [])]
+            for need, label in CONE_ROLE_NAMES.items():
+                if need not in roles:
+                    errs.append("%s 缺少%s" % (where, label))
+            if any(not str(c.get("coneNo") or "").strip()
+                   for c in p.get("cones", [])):
+                errs.append(where + " 有锥未填锥号")
+        for i in range(len(packs)):
+            for j in range(i + 1, len(packs)):
+                xi, yi = packs[i].get("x"), packs[i].get("y")
+                xj, yj = packs[j].get("x"), packs[j].get("y")
+                if all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                       for v in (xi, yi, xj, yj)):
+                    if (xi - xj) ** 2 + (yi - yj) ** 2 < CONE_POS_EPS ** 2:
+                        errs.append("%s 布点#%d 与 #%d 重位"
+                                    % (lname, i + 1, j + 1))
+    if layers and not npacks:
+        errs.append("至少放置一个锥组")
+    ranks = [g.get("rank") for g in data.get("grades", [])
+             if isinstance(g, dict) and g.get("rank") is not None]
+    if len(ranks) != len(set(ranks)):
+        errs.append("判读等级的排序值必须唯一（自定义等级须明确排序）")
+    return errs
+
+
+def api_list_conesheets(conn, plan_id):
+    rows = conn.execute(
+        "SELECT c.id, c.plan_id, c.kiln_id, c.firing_id, c.name, c.status, "
+        "c.created_at, c.updated_at, "
+        "(SELECT name FROM firings f WHERE f.id = c.firing_id) AS firing_name "
+        "FROM cone_sheets c WHERE c.plan_id=? ORDER BY c.id DESC",
+        (plan_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def api_create_conesheet(conn, plan_id, body):
+    plan = conn.execute("SELECT id, kiln_id FROM plans WHERE id=?",
+                        (plan_id,)).fetchone()
+    if not plan:
+        raise ValueError("方案不存在")
+    name = str(body.get("name", "")).strip() or "未命名观测单"
+    data = body.get("data") or {}
+    status = str(body.get("status") or "draft")
+    if status not in ("draft", "locked", "reading", "sealed"):
+        raise ValueError("观测单状态无效")
+    if status != "draft":
+        errs = _cone_validate(data)
+        if errs:
+            raise ValueError("数据未通过检查：" + "；".join(errs[:6]))
+    snapshot = body.get("snapshot")
+    if status == "sealed":
+        missing = _cone_unread(data)
+        if missing:
+            raise ValueError("还有 %d 个点位未判读，不能封存" % missing)
+        if not snapshot:
+            snapshot = {"sealedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "data": data, "analysis": body.get("analysis")}
+    cur = conn.execute(
+        "INSERT INTO cone_sheets(plan_id, kiln_id, firing_id, name, status, "
+        "data, snapshot) VALUES(?,?,?,?,?,?,?)",
+        (plan_id, plan["kiln_id"], body.get("firing_id"), name, status,
+         json.dumps(data, ensure_ascii=False),
+         json.dumps(snapshot, ensure_ascii=False) if snapshot else None))
+    conn.commit()
+    return {"id": cur.lastrowid}
+
+
+def api_get_conesheet(conn, sheet_id):
+    row = conn.execute(
+        "SELECT c.id, c.plan_id, c.kiln_id, c.firing_id, c.name, c.status, "
+        "c.data, c.snapshot, c.created_at, c.updated_at, "
+        "(SELECT name FROM firings f WHERE f.id = c.firing_id) AS firing_name "
+        "FROM cone_sheets c WHERE c.id=?", (sheet_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def api_update_conesheet(conn, sheet_id, body):
+    row = conn.execute("SELECT * FROM cone_sheets WHERE id=?",
+                       (sheet_id,)).fetchone()
+    if not row:
+        return None
+    status = row["status"]
+    if status == "sealed":
+        raise ValueError("观测单已封存，快照不可变，不能再修改")
+    data = json.loads(row["data"])
+    new_data = body.get("data", data)
+    new_status = str(body.get("status") or status)
+    if new_status != status and new_status not in CONE_FLOW[status]:
+        raise ValueError("观测单状态只能按 草稿→已锁定→待判读→已封存 流转")
+    if status != "draft":
+        if _cone_placement(new_data) != _cone_placement(data):
+            raise ValueError("锁定后布点与判读等级不可再改动")
+        if status == "locked" and _cone_unread(new_data) > 0:
+            raise ValueError("请先「出窑判读」再登记判读结果")
+    if new_status == "locked":
+        errs = _cone_validate(new_data)
+        if errs:
+            raise ValueError("锁定前请先修正：" + "；".join(errs[:6]))
+    name = str(body.get("name", row["name"])).strip() or row["name"]
+    firing_id = body.get("firing_id", row["firing_id"])
+    conn.execute(
+        "UPDATE cone_sheets SET name=?, firing_id=?, status=?, data=?, "
+        "updated_at=datetime('now','localtime') WHERE id=?",
+        (name, firing_id, new_status,
+         json.dumps(new_data, ensure_ascii=False), sheet_id))
+    conn.commit()
+    return {"ok": True}
+
+
+def api_seal_conesheet(conn, sheet_id, body):
+    row = conn.execute("SELECT * FROM cone_sheets WHERE id=?",
+                       (sheet_id,)).fetchone()
+    if not row:
+        return None
+    if row["status"] == "sealed":
+        raise ValueError("观测单已封存")
+    if row["status"] != "reading":
+        raise ValueError("只有「待判读」状态才能封存")
+    data = json.loads(row["data"])
+    missing = _cone_unread(data)
+    if missing:
+        raise ValueError("还有 %d 个点位未判读，全部处理后才能封存" % missing)
+    snapshot = {
+        "sealedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "data": data,                      # 以库内数据为准，保证快照与观测单一致
+        "analysis": body.get("analysis"),  # 前端算好的冷热差/待复核结果
+    }
+    conn.execute(
+        "UPDATE cone_sheets SET status='sealed', snapshot=?, "
+        "updated_at=datetime('now','localtime') WHERE id=?",
+        (json.dumps(snapshot, ensure_ascii=False), sheet_id))
+    conn.commit()
+    return {"ok": True}
+
+
+def api_delete_conesheet(conn, sheet_id):
+    row = conn.execute("SELECT status FROM cone_sheets WHERE id=?",
+                       (sheet_id,)).fetchone()
+    if not row:
+        return None
+    if row["status"] == "sealed":
+        raise ValueError("观测单已封存，快照不可删除")
+    conn.execute("DELETE FROM cone_sheets WHERE id=?", (sheet_id,))
+    conn.commit()
+    return {"ok": True}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "KilnPlanner/1.0"
 
@@ -353,6 +565,14 @@ class Handler(BaseHTTPRequestHandler):
                         and parts[3] == "firings"):
                     return self.send_json(
                         api_list_firings(conn, int(parts[2])))
+                if (len(parts) == 4 and parts[1] == "plans"
+                        and parts[3] == "conesheets"):
+                    return self.send_json(
+                        api_list_conesheets(conn, int(parts[2])))
+                if len(parts) == 3 and parts[1] == "conesheets":
+                    result = api_get_conesheet(conn, int(parts[2]))
+                    return (self.send_json(result) if result
+                            else self.send_error_json(404, "观测单不存在"))
                 if len(parts) == 3 and parts[1] == "firings":
                     result = api_get_firing(conn, int(parts[2]))
                     return (self.send_json(result) if result
@@ -388,6 +608,15 @@ class Handler(BaseHTTPRequestHandler):
                         and parts[3] == "firings"):
                     result = api_create_firing(conn, int(parts[2]), body)
                     return self.send_json(result)
+                if (len(parts) == 4 and parts[1] == "plans"
+                        and parts[3] == "conesheets"):
+                    result = api_create_conesheet(conn, int(parts[2]), body)
+                    return self.send_json(result)
+                if (len(parts) == 4 and parts[1] == "conesheets"
+                        and parts[3] == "seal"):
+                    result = api_seal_conesheet(conn, int(parts[2]), body)
+                    return (self.send_json(result) if result
+                            else self.send_error_json(404, "观测单不存在"))
             self.send_error_json(404, "未知接口")
         except ValueError as exc:
             self.send_error_json(400, str(exc))
@@ -411,6 +640,10 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) == 3 and parts[1] == "firings":
                     api_update_firing(conn, int(parts[2]), body)
                     return self.send_json({"ok": True})
+                if len(parts) == 3 and parts[1] == "conesheets":
+                    result = api_update_conesheet(conn, int(parts[2]), body)
+                    return (self.send_json(result) if result
+                            else self.send_error_json(404, "观测单不存在"))
             self.send_error_json(404, "未知接口")
         except ValueError as exc:
             self.send_error_json(400, str(exc))
@@ -436,6 +669,10 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) == 3 and parts[1] == "firings":
                     api_delete_firing(conn, int(parts[2]))
                     return self.send_json({"ok": True})
+                if len(parts) == 3 and parts[1] == "conesheets":
+                    result = api_delete_conesheet(conn, int(parts[2]))
+                    return (self.send_json(result) if result
+                            else self.send_error_json(404, "观测单不存在"))
             self.send_error_json(404, "未知接口")
         except (ValueError, IndexError) as exc:
             self.send_error_json(400, "请求参数无效: %s" % exc)
